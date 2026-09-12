@@ -13,6 +13,7 @@
 
 #include "../api/wifi.h"
 #include "../api/error.h"
+#include "wifi_send_all.h"
 
 #include <nuttx/config.h>
 
@@ -41,6 +42,22 @@
  * 80KB 一次 send 会耗尽 WiFi TX 帧缓冲并导致 HPWORK 崩溃。 */
 #define HTTP_SEND_CHUNK   2048
 #define HTTP_SEND_GAP_US  2000
+
+/* Bound this connection's TCP backlog, independently of the system-wide
+ * 128 KiB default.  This is pressure mitigation, not a proven kernel fix.
+ */
+#define HTTP_SNDBUF_SIZE  8192
+
+static int http_write_chunk(void *ctx, const char *data, size_t length)
+{
+  return (int)send(*(int *)ctx, data, length, 0);
+}
+
+static void http_pause_tx(void *ctx)
+{
+  (void)ctx;
+  usleep(HTTP_SEND_GAP_US);
+}
 
 /* HTTP 请求鉴权 Key (Authorization: Bearer), wifi_set_http_auth 设置 */
 static char g_http_api_key[80];
@@ -266,6 +283,7 @@ int wifi_http_post(const char *url, const char *body,
       int sock;
       int req_len;
       int n;
+      int sndbuf = HTTP_SNDBUF_SIZE;
 
       he = gethostbyname(host);
       if (he == NULL)
@@ -281,8 +299,14 @@ int wifi_http_post(const char *url, const char *body,
 
       tv.tv_sec = HTTP_TIMEOUT_SEC;
       tv.tv_usec = 0;
-      setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-      setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+      if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+          setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0 ||
+          setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
+        {
+          printf("[wifi] HTTP socket configuration failed errno=%d\n", errno);
+          close(sock);
+          return FOCUS_ERR_IO;
+        }
 
       memset(&addr, 0, sizeof(addr));
       addr.sin_family = AF_INET;
@@ -323,9 +347,17 @@ int wifi_http_post(const char *url, const char *body,
             return FOCUS_ERR_PARAM;
           }
 
-        if (send(sock, req, req_len, 0) < 0)
+        if (wifi_send_all(&sock, req, (size_t)req_len, HTTP_SEND_CHUNK,
+                          http_write_chunk, http_pause_tx) < 0 ||
+            wifi_send_all(&sock, body, strlen(body), HTTP_SEND_CHUNK,
+                          http_write_chunk, http_pause_tx) < 0)
           {
+            int send_errno = errno;
             close(sock);
+            if (send_errno == EAGAIN || send_errno == EWOULDBLOCK)
+              {
+                return FOCUS_ERR_TIMEOUT;
+              }
             if (attempt == 0)
               {
                 continue;
@@ -333,47 +365,6 @@ int wifi_http_post(const char *url, const char *body,
             return FOCUS_ERR_NET_DISCONN;
           }
 
-        /* 请求体 (base64 图, 可达 80KB+) 分块发送, 每块后短暂让出。
-         * 一次性 send 80KB 会把 WiFi 发送路径的帧缓冲 (esf_buf) 一次耗尽,
-         * 驱动在 esf_buf_alloc_dynamic 拿到坏指针后写入非法地址,
-         * 导致 HPWORK 任务 StoreProhibited 崩溃 (真机实测)。 */
-        {
-          size_t body_len = strlen(body);
-          size_t sent = 0;
-
-          while (sent < body_len)
-            {
-              size_t chunk = body_len - sent;
-              ssize_t w;
-
-              if (chunk > HTTP_SEND_CHUNK)
-                {
-                  chunk = HTTP_SEND_CHUNK;
-                }
-
-              w = send(sock, body + sent, chunk, 0);
-              if (w <= 0)
-                {
-                  break;
-                }
-
-              sent += (size_t)w;
-              if (sent < body_len)
-                {
-                  usleep(HTTP_SEND_GAP_US);   /* 让 WiFi TX 队列排空 */
-                }
-            }
-
-          if (sent < body_len)
-            {
-              close(sock);
-              if (attempt == 0)
-                {
-                  continue;
-                }
-              return FOCUS_ERR_NET_DISCONN;
-            }
-        }
       }
 
       /* 循环读响应直至连接关闭 (Connection: close), 避免大响应被截断 */
