@@ -18,6 +18,8 @@ if(NOT WIN32)
   target_link_libraries(focus_aiot_tests PRIVATE pthread)
 endif()
 enable_testing()
+add_executable(focus_aiot_wifi_send_tests test_wifi_send.c)
+add_test(NAME focus_aiot_wifi_send_tests COMMAND focus_aiot_wifi_send_tests)
 add_test(NAME focus_aiot_tests COMMAND focus_aiot_tests)
 
 add_executable(focus_aiot_behavior_tests
