@@ -1,0 +1,6 @@
+=== contest-log-upload validation ===
+Logs dir:       C:\Users\zs200\Documents\Codex\2026-09-11\ni\outputs\codex-logs-fixed-20260916\logs
+Files checked:  3
+Events checked: 395
+
+✅ ALL OK

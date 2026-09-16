@@ -1,0 +1,8 @@
+{
+  "official_base_commit": "10743591d1034480ecee7c8ffffe9bb251d4474d",
+  "official_validator_unmodified": true,
+  "sessions": 3,
+  "events": 395,
+  "local_patch": true,
+  "uploaded": false
+}
